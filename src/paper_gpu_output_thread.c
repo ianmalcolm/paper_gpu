@@ -391,6 +391,15 @@ static int init_idx_map()
   return 0;
 }
 
+static int memset_float(float* p, float n, int length)
+{
+    for(int i=0; i<length; i++)
+    {
+        *p++=n;
+    }
+    return 0;
+}
+
 static int init(struct hashpipe_thread_args *args)
 {
     // Get sizing parameters
@@ -426,7 +435,10 @@ static void *run(hashpipe_thread_args_t * args)
       .tv_nsec = PACKET_DELAY_NS
     };
 
+    unsigned int integration_period = 1024;
+
     hashpipe_status_lock_safe(&st);
+    hgetu4(st.buf, "INTEGRATION", &integration_period);
     hgetu4(st.buf, "XID", &xengine_id); // No change if not found
     hputu4(st.buf, "XID", xengine_id);
     hputu4(st.buf, "OUTDUMPS", 0);
@@ -475,10 +487,16 @@ static void *run(hashpipe_thread_args_t * args)
     int block_idx = 0;
     struct timespec start, stop;
     struct timespec pkt_start, pkt_stop;
+
+    int cnt_integration = 0;
+    float integral[N_OUTPUT_MATRIX];
+    memset_float(integral,0,N_OUTPUT_MATRIX);
+
     while (run_threads()) {
 
         hashpipe_status_lock_safe(&st);
         hputs(st.buf, status_key, "waiting");
+        hputi4(st.buf, "INTEGRAT",cnt_integration);
         hashpipe_status_unlock_safe(&st);
 
         // Wait for new block to be filled
@@ -494,6 +512,14 @@ static void *run(hashpipe_thread_args_t * args)
                 pthread_exit(NULL);
                 break;
             }
+        }
+
+        for(int i=0; i<N_OUTPUT_MATRIX; i++)
+        {
+            integral[i] = integral[i] + db->block[block_idx].data[i];
+        }
+        if (++cnt_integration < integration_period) {
+            continue;
         }
 
         clock_gettime(CLOCK_MONOTONIC, &start);
@@ -517,8 +543,8 @@ static void *run(hashpipe_thread_args_t * args)
         pkt.hdr.offset = OFFSET(nbytes);
 
         // Unpack and convert in packet sized chunks
-        float * pf_re  = db->block[block_idx].data;
-        float * pf_im  = db->block[block_idx].data + xgpu_info.matLength;
+        float * pf_re  = integral;
+        float * pf_im  = integral + xgpu_info.matLength;
         pktdata_t * p_out = pkt.data;
         clock_gettime(CLOCK_MONOTONIC, &pkt_start);
         for(casper_chan=0; casper_chan<N_CHAN_PER_X; casper_chan++) {
@@ -581,6 +607,10 @@ static void *run(hashpipe_thread_args_t * args)
         hashpipe_status_unlock_safe(&st);
 
 done_sending:
+
+        // Reset counter and integral
+        cnt_integration = 0;
+        memset_float(integral,0,N_OUTPUT_MATRIX);
 
         // Mark block as free
         paper_output_databuf_set_free(db, block_idx);
